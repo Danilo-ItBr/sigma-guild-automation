@@ -1,0 +1,31 @@
+# Ambientes Virtuais Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# CREDENCIAIS E DADOS SENSÍVEIS (NUNCA SUBIR)
+credentials.json
+config.py
+*.pem
+*.key
+*.token
+
+# Perfis de Navegador Isolados (Contêm sessões, senhas, tokens do jogo e WhatsApp)
+chrome_profile/
+whatsapp_profile/
+
+# Arquivos de Log e Depuração
+*.log
+scraper.log
+whatsapp_debug.png
+debug_*.png
+*.png
+
+# Arquivos de Sistema e IDE
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

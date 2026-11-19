@@ -1,22 +1,34 @@
 """
 main.py — Orquestrador Principal do Robô Sigma Guilda
 ======================================================
-Executado diariamente às 09:00 pelo Windows Task Scheduler via run.bat.
+Executado diariamente às 09:00 pelo Windows Task Scheduler via run.bat
+(ou manualmente via Executar_Robo_Manual.bat a qualquer hora).
 
-Fluxo:
-  1. Conecta ao Chrome via CDP (Chrome deve estar aberto com Abrir_Sigma_Robo.bat)
-  2. Localiza a janela do Sigma Project
-  3. Scrapa MEMBROS → salva em g_membros no Google Sheets
-  4. Scrapa REGISTRO → tesouro (D-1) → salva em g_doacoes
-  5. Fecha o painel da guilda (Escape)
-  6. Consolida doações da semana atual
-  7. Monta a mensagem de WhatsApp
-  8. Envia para o grupo "Check-In G3 📆"
+Fluxo em Tempo Real (Zero Duplicidade):
+  1. Conecta ao Chrome via CDP (porta 9222).
+  2. Localiza a janela do Sigma Project.
+  3. Scrapa MEMBROS atuais -> salva/atualiza na aba 'g_membros'.
+  4. Scrapa REGISTRO -> tesouro para D-1 (ontem) e HOJE (tempo real até o momento).
+  5. Atualiza a aba 'g_doacoes' no Google Sheets de forma atômica (substitui os dias coletados,
+     garantindo que execuções repetidas não gerem duplicidade).
+  6. Fecha o painel da guilda (Escape).
+  7. Consolida as doações da semana atual (segunda-feira 00:00 até domingo 23:59).
+  8. Monta o relatório com destaques e alertas.
+  9. Envia a mensagem formatada para o grupo do WhatsApp (Check-In G2 📆).
 """
 
 import asyncio
+import io
+import sys
 from datetime import datetime, timedelta
 
+# Garante saída UTF-8 no Windows para evitar erros de codificação em arquivos de log
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+import gspread
 from playwright.async_api import async_playwright
 
 import config
@@ -25,15 +37,13 @@ from consolidator import consolidate_weekly
 from message_builder import build_weekly_message
 from whatsapp_sender import send_whatsapp_message
 
-# ── Re-usa as funções do scraper.py ──────────────────────────────────────────
 from scraper import (
-    get_target_date_info,
     find_player_page,
     navigate_to_treasury,
-    scrape_treasury_records,
-    save_to_google_sheets,
     close_guild_modal,
 )
+
+TARGET_SHEET_NAME = "g_doacoes"
 
 
 def _banner(titulo: str):
@@ -43,15 +53,105 @@ def _banner(titulo: str):
     print(f"{sep}")
 
 
+async def scrape_donations_for_dates(page, target_dates):
+    """
+    Extrai doações que correspondam a qualquer uma das datas na lista target_dates.
+    target_dates: lista de tuplas [(dd_mm_str, dd_mm_yyyy_str), ...]
+    Ex: [("18/11", "18/11/2026"), ("17/11", "17/11/2026")]
+    """
+    date_map = {item[0]: item[1] for item in target_dates}
+    target_game_strs = list(date_map.keys())
+
+    print(f"Extraindo doações para as datas: {', '.join(target_game_strs)}...")
+
+    raw_records = await page.evaluate(r'''() => {
+        const results = [];
+        const iTags = document.querySelectorAll('aside.dossie i');
+        for (const i of iTags) {
+            const next = i.nextElementSibling;
+            if (!next) continue;
+            if (next.innerText && next.innerText.includes('doou')) {
+                const iText = i.innerText.trim();
+                const parts = iText.split(',');
+                const d = parts[0] ? parts[0].trim() : '';
+                const h = parts[1] ? parts[1].trim() : '';
+                
+                const bTags = Array.from(next.querySelectorAll('b')).map(b => b.innerText.trim());
+                const player = bTags[0] || '';
+                const valor = bTags[1] || '';
+                
+                results.push({ d, h, player, valor });
+            }
+        }
+        return results;
+    }''')
+
+    records_by_date = {full_dt: [] for full_dt in date_map.values()}
+
+    for item in raw_records:
+        d = item["d"]
+        if d in date_map:
+            full_dt = date_map[d]
+            records_by_date[full_dt].append([full_dt, item["h"], item["player"], item["valor"]])
+
+    for dt, recs in records_by_date.items():
+        print(f"  • {dt}: {len(recs)} doações encontradas.")
+
+    return records_by_date
+
+
+def save_multiple_dates_to_sheets(records_by_date):
+    """
+    Atualiza atomicamente as datas coletadas na aba g_doacoes.
+    Substitui as linhas das datas alvos pelas novas, garantindo ZERO duplicidade
+    mesmo que o robô seja executado múltiplas vezes no mesmo dia.
+    """
+    gc = gspread.service_account(filename=config.CREDENTIALS_FILE)
+    sh = gc.open_by_key(config.SPREADSHEET_ID)
+
+    try:
+        worksheet = sh.worksheet(TARGET_SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = sh.add_worksheet(title=TARGET_SHEET_NAME, rows="1000", cols="10")
+
+    existing_values = worksheet.get_all_values()
+    header = ["data", "hora", "jogador", "doou"]
+
+    if not existing_values:
+        existing_values = [header]
+    elif existing_values[0] != header:
+        existing_values.insert(0, header)
+
+    current_rows = existing_values[1:]
+    dates_to_update = set(records_by_date.keys())
+
+    # Preserva todas as datas anteriores que não estão sendo atualizadas agora
+    preserved_rows = [row for row in current_rows if len(row) > 0 and row[0] not in dates_to_update]
+
+    new_rows = []
+    for dt, recs in records_by_date.items():
+        new_rows.extend(recs)
+
+    all_to_write = [header] + preserved_rows + new_rows
+    worksheet.clear()
+    worksheet.update(all_to_write, "A1")
+    print(f"✅ Planilha '{TARGET_SHEET_NAME}' atualizada com sucesso ({len(new_rows)} linhas sincronizadas).")
+
+
 async def main():
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    _banner(f"Robô Sigma Guilda — {agora}")
+    agora = datetime.now()
+    ontem = agora - timedelta(days=1)
 
-    # ── Passo 0: calcula data alvo D-1 ───────────────────────────────────────
-    game_d1_str, full_date_str = get_target_date_info()
-    print(f"Data alvo (D-1): {game_d1_str} → {full_date_str}")
+    hoje_game = agora.strftime("%d/%m")
+    hoje_full = agora.strftime("%d/%m/%Y")
 
-    # ── Passo 1: conecta ao Chrome via CDP ───────────────────────────────────
+    ontem_game = ontem.strftime("%d/%m")
+    ontem_full = ontem.strftime("%d/%m/%Y")
+
+    _banner(f"Robô Sigma Guilda (EXTRAÇÃO EM TEMPO REAL) — {agora.strftime('%d/%m/%Y %H:%M:%S')}")
+    print(f"Datas alvos da extração: Ontem ({ontem_full}) e HOJE ({hoje_full}) até o momento")
+
+    # ── Passo 1: Conecta ao Chrome via CDP ───────────────────────────────────
     _banner("Passo 1/7 — Conectando ao Chrome")
     async with async_playwright() as p:
         try:
@@ -59,30 +159,33 @@ async def main():
             print(f"✅ Conectado ao Chrome em {config.CDP_URL}")
         except Exception as e:
             print(f"❌ Falha ao conectar ao Chrome: {e}")
-            print("   Certifique-se de que o Abrir_Sigma_Robo.bat foi executado antes.")
+            print("   Certifique-se de que o jogo está aberto com o Abrir_Sigma_Robo.bat.")
             return
 
-        # ── Passo 2: localiza a página do jogo ───────────────────────────────
         page = await find_player_page(browser)
         if not page:
-            print("❌ Janela do Sigma Project não encontrada. Abra o jogo primeiro.")
+            print("❌ Janela do Sigma Project não encontrada.")
             return
         print(f"✅ Página encontrada: '{await page.title()}'")
 
         try:
-            # ── Passo 3: scrapa MEMBROS ───────────────────────────────────────
-            _banner("Passo 2/7 — Coletando lista de membros")
+            # ── Passo 2: scrapa MEMBROS ───────────────────────────────────────
+            _banner("Passo 2/7 — Coletando lista de membros atual")
             members = await scrape_and_save_members(page)
-            print(f"✅ {len(members)} membros salvos em 'g_membros'.")
+            print(f"✅ {len(members)} membros atualizados em 'g_membros'.")
 
-            # ── Passo 4: scrapa REGISTRO → tesouro ───────────────────────────
-            _banner("Passo 3/7 — Coletando doações do Tesouro (D-1)")
+            # ── Passo 3: scrapa REGISTRO -> tesouro (Ontem e Hoje) ────────────
+            _banner("Passo 3/7 — Coletando doações do Tesouro (Ontem + Hoje)")
             await navigate_to_treasury(page)
-            records = await scrape_treasury_records(page, game_d1_str, full_date_str)
-            save_to_google_sheets(records, full_date_str)
-            print(f"✅ {len(records)} doações de {full_date_str} salvas em 'g_doacoes'.")
 
-            # ── Passo 5: fecha painel da guilda ───────────────────────────────
+            target_dates = [
+                (ontem_game, ontem_full),
+                (hoje_game, hoje_full)
+            ]
+            records_by_date = await scrape_donations_for_dates(page, target_dates)
+            save_multiple_dates_to_sheets(records_by_date)
+
+            # ── Passo 4: fecha painel da guilda ───────────────────────────────
             _banner("Passo 4/7 — Fechando painel da Guilda")
             await close_guild_modal(page)
             print("✅ Painel fechado.")
@@ -91,13 +194,10 @@ async def main():
             print(f"❌ Erro durante coleta dos dados: {e}")
             import traceback
             traceback.print_exc()
-            # Continua mesmo com erro de scraping para tentar enviar mensagem
-            # com os dados que já estavam na planilha
             print("⚠️  Continuando com dados existentes na planilha...")
 
-    # ── Passo 6: consolida semana ─────────────────────────────────────────────
-    # (fora do bloco async_playwright pois usa apenas gspread)
-    _banner("Passo 5/7 — Consolidando doações da semana")
+    # ── Passo 5: consolida semana ─────────────────────────────────────────────
+    _banner("Passo 5/7 — Consolidando doações da semana (incluindo doações de hoje)")
     try:
         consolidation = consolidate_weekly()
         semana = consolidation["semana"]
@@ -111,7 +211,7 @@ async def main():
         traceback.print_exc()
         return
 
-    # ── Passo 7: monta mensagem ───────────────────────────────────────────────
+    # ── Passo 6: monta mensagem ───────────────────────────────────────────────
     _banner("Passo 6/7 — Montando mensagem WhatsApp")
     try:
         mensagem = build_weekly_message(consolidation)
@@ -125,7 +225,7 @@ async def main():
         traceback.print_exc()
         return
 
-    # ── Passo 8: envia WhatsApp ───────────────────────────────────────────────
+    # ── Passo 7: envia WhatsApp ───────────────────────────────────────────────
     _banner("Passo 7/7 — Enviando mensagem no WhatsApp")
     try:
         sucesso = await send_whatsapp_message(config.WHATSAPP_GROUP_NAME, mensagem)

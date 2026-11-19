@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import gspread
 import config
 
@@ -16,38 +16,33 @@ def _parse_valor(valor_str: str) -> int:
     return int(str(valor_str).replace(".", "").replace(",", "").strip())
 
 
-def get_current_week_range():
+def get_consolidation_week_range(reference_date=None):
     """
-    Retorna (segunda-feira desta semana, domingo desta semana) como objetos date.
-    A semana vai de segunda (00:00) a domingo (23:59) no horário de Brasília.
+    Regra de Negócio do Ciclo da Guilda:
+    - Se hoje for SEGUNDA-FEIRA (weekday == 0):
+        Consolida a SEMANA ANTERIOR FECHADA (segunda passada a domingo passado).
+        Tipo: 'fechamento'
+    - Se hoje for de TERÇA a DOMINGO (weekday 1 a 6):
+        Consolida a SEMANA ATUAL em tempo real (segunda desta semana até o próximo domingo).
+        Tipo: 'em_andamento'
     """
-    today = datetime.now().date()
-    # weekday(): Monday = 0, Sunday = 6
-    monday = today - timedelta(days=today.weekday())
-    sunday = monday + timedelta(days=6)
-    return monday, sunday
+    ref = reference_date or date.today()
+    weekday = ref.weekday()  # Monday = 0, Sunday = 6
+
+    if weekday == 0:  # Segunda-feira: Fechamento da semana anterior
+        sunday_past = ref - timedelta(days=1)
+        monday_past = sunday_past - timedelta(days=6)
+        return monday_past, sunday_past, "fechamento"
+    else:  # Terça a Domingo: Semana corrente em andamento
+        monday_current = ref - timedelta(days=weekday)
+        sunday_current = monday_current + timedelta(days=6)
+        return monday_current, sunday_current, "em_andamento"
 
 
-def consolidate_weekly(spreadsheet_id=None, credentials_file=None, meta=None):
+def consolidate_weekly(spreadsheet_id=None, credentials_file=None, meta=None, reference_date=None):
     """
-    Lê g_doacoes e g_membros, filtra doações da semana atual (seg–dom),
-    soma por jogador e retorna um dict estruturado.
-
-    Retorno:
-    {
-        "semana": {"inicio": date, "fim": date},
-        "membros": {
-            "NomeDoJogador": {
-                "total":  int,   # total doado na semana
-                "falta":  int,   # quanto falta para a meta (0 se já atingiu)
-                "status": str    # "ok", "abaixo", "zerado"
-            },
-            ...
-        },
-        "nao_membros": {
-            "OutroJogador": int  # doadores que não estão na lista de membros
-        }
-    }
+    Lê g_doacoes e g_membros, aplica a janela correta (semana anterior se for segunda-feira,
+    ou semana atual de terça a domingo), soma por jogador e retorna o dict estruturado.
     """
     spreadsheet_id   = spreadsheet_id   or config.SPREADSHEET_ID
     credentials_file = credentials_file or config.CREDENTIALS_FILE
@@ -65,13 +60,12 @@ def consolidate_weekly(spreadsheet_id=None, credentials_file=None, meta=None):
         print(f"⚠️ Aba '{SHEET_MEMBROS}' não encontrada. Rode members_scraper primeiro.")
         membros_rows = []
 
-    # Extrai nomes (pula cabeçalho se existir)
     nomes_membros = []
     for row in membros_rows:
         if not row or not row[0]:
             continue
         nome = row[0].strip()
-        if nome.lower() == "membro":   # linha de cabeçalho
+        if nome.lower() == "membro":
             continue
         nomes_membros.append(nome)
 
@@ -85,11 +79,11 @@ def consolidate_weekly(spreadsheet_id=None, credentials_file=None, meta=None):
         print(f"⚠️ Aba '{SHEET_DOACOES}' não encontrada.")
         doacoes_rows = []
 
-    # ── 3. Determina janela semanal ──────────────────────────────────────────
-    monday, sunday = get_current_week_range()
-    print(f"Semana atual: {monday.strftime('%d/%m/%Y')} a {sunday.strftime('%d/%m/%Y')}")
+    # ── 3. Determina janela da semana e tipo ─────────────────────────────────
+    monday, sunday, tipo_relatorio = get_consolidation_week_range(reference_date)
+    print(f"Período de consolidação ({tipo_relatorio}): {monday.strftime('%d/%m/%Y')} a {sunday.strftime('%d/%m/%Y')}")
 
-    # ── 4. Filtra e agrega doações da semana ─────────────────────────────────
+    # ── 4. Filtra e agrega doações do período ────────────────────────────────
     totais: dict[str, int] = {}
 
     for row in doacoes_rows:
@@ -98,18 +92,15 @@ def consolidate_weekly(spreadsheet_id=None, credentials_file=None, meta=None):
         data_str, _hora, jogador, valor_str = row[0], row[1], row[2], row[3]
         jogador = jogador.strip()
 
-        # Pula cabeçalho
         if data_str.lower() == "data" or not data_str:
             continue
 
-        # Converte data
         try:
-            data = datetime.strptime(data_str.strip(), "%d/%m/%Y").date()
+            data_val = datetime.strptime(data_str.strip(), "%d/%m/%Y").date()
         except ValueError:
             continue
 
-        # Filtra pela semana atual
-        if not (monday <= data <= sunday):
+        if not (monday <= data_val <= sunday):
             continue
 
         valor = _parse_valor(valor_str)
@@ -119,28 +110,27 @@ def consolidate_weekly(spreadsheet_id=None, credentials_file=None, meta=None):
     resultado_membros   = {}
     resultado_nao_membros = {}
 
-    # Inicializa todos os membros com total zero
     for nome in nomes_membros:
+        total = totais.get(nome, 0)
         resultado_membros[nome] = {
-            "total":  totais.get(nome, 0),
-            "falta":  max(0, meta - totais.get(nome, 0)),
-            "status": _classificar(totais.get(nome, 0), meta)
+            "total":  total,
+            "falta":  max(0, meta - total),
+            "status": _classificar(total, meta)
         }
 
-    # Doadores que não estão na lista de membros
     for jogador, total in totais.items():
         if jogador not in nomes_membros:
             resultado_nao_membros[jogador] = total
 
     return {
-        "semana":      {"inicio": monday, "fim": sunday},
-        "membros":     resultado_membros,
-        "nao_membros": resultado_nao_membros
+        "semana":         {"inicio": monday, "fim": sunday},
+        "tipo_relatorio": tipo_relatorio,
+        "membros":        resultado_membros,
+        "nao_membros":    resultado_nao_membros
     }
 
 
 def _classificar(total: int, meta: int) -> str:
-    """Classifica o membro em 'ok', 'abaixo' ou 'zerado'."""
     if total >= meta:
         return "ok"
     elif total > 0:
@@ -150,21 +140,14 @@ def _classificar(total: int, meta: int) -> str:
 
 
 def _fmt(valor: int) -> str:
-    """Formata inteiro como '4.000.000' (padrão do jogo)."""
     return f"{valor:,}".replace(",", ".")
 
 
-# ── Teste isolado ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import json
     resultado = consolidate_weekly()
     semana = resultado["semana"]
-    print(f"\nSemana: {semana['inicio'].strftime('%d/%m/%Y')} a {semana['fim'].strftime('%d/%m/%Y')}")
+    print(f"\nTipo: {resultado['tipo_relatorio']} | Período: {semana['inicio'].strftime('%d/%m/%Y')} a {semana['fim'].strftime('%d/%m/%Y')}")
     print(f"\n{'Nome':<25} {'Total':>12} {'Falta':>12} {'Status'}")
     print("-" * 65)
     for nome, dados in sorted(resultado["membros"].items()):
         print(f"{nome:<25} {_fmt(dados['total']):>12} {_fmt(dados['falta']):>12} {dados['status']}")
-    if resultado["nao_membros"]:
-        print("\nDoadores fora da lista de membros:")
-        for nome, total in resultado["nao_membros"].items():
-            print(f"  {nome}: {_fmt(total)}")

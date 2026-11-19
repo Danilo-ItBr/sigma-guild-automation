@@ -10,48 +10,54 @@ def _fmt(valor: int) -> str:
 def build_weekly_message(consolidation_data: dict, meta: int = None) -> str:
     """
     Constrói a mensagem semanal de doações para envio no WhatsApp.
-
-    Parâmetros:
-        consolidation_data: resultado de consolidator.consolidate_weekly()
-        meta: valor inteiro da meta semanal (padrão: config.META_SEMANAL)
-
-    Retorna:
-        String formatada com \\n para quebras de linha.
+    Se for segunda-feira ('fechamento'), gera o relatório oficial de encerramento da semana anterior.
+    De terça a domingo ('em_andamento'), gera o relatório de acompanhamento diário.
     """
     meta = meta or config.META_SEMANAL
 
-    semana    = consolidation_data["semana"]
-    membros   = consolidation_data["membros"]
-    inicio    = semana["inicio"].strftime("%d/%m")
-    fim       = semana["fim"].strftime("%d/%m/%Y")
+    semana         = consolidation_data["semana"]
+    tipo_relatorio = consolidation_data.get("tipo_relatorio", "em_andamento")
+    membros        = consolidation_data["membros"]
+    inicio         = semana["inicio"].strftime("%d/%m")
+    fim            = semana["fim"].strftime("%d/%m/%Y")
 
     # Separa membros por categoria
     ok      = [(n, d) for n, d in membros.items() if d["status"] == "ok"]
     abaixo  = [(n, d) for n, d in membros.items() if d["status"] == "abaixo"]
     zerados = [(n, d) for n, d in membros.items() if d["status"] == "zerado"]
 
-    # Ordena: zerados → abaixo → ok (por nome)
     ok.sort(key=lambda x: x[0])
     abaixo.sort(key=lambda x: x[1]["total"])   # ordena do menor para o maior
     zerados.sort(key=lambda x: x[0])
 
     linhas = []
 
-    # ── Cabeçalho ─────────────────────────────────────────────────────────
-    linhas.append("🏰 *RELATÓRIO SEMANAL DE DOAÇÕES* 🏰")
-    linhas.append(f"📅 Semana: {inicio} a {fim}")
-    linhas.append(f"🎯 Meta por membro: *{_fmt(meta)}*")
+    # ── Cabeçalho Dinâmico ────────────────────────────────────────────────
+    if tipo_relatorio == "fechamento":
+        linhas.append("🏆 *FECHAMENTO SEMANAL DA GUILDA* 🏆")
+        linhas.append(f"📅 Ciclo Encerrado: *{inicio} a {fim}*")
+        linhas.append(f"🎯 Meta estipulada: *{_fmt(meta)}*")
+    else:
+        linhas.append("🏰 *RELATÓRIO SEMANAL DE DOAÇÕES* 🏰")
+        linhas.append(f"📅 Semana: {inicio} a {fim}")
+        linhas.append(f"🎯 Meta por membro: *{_fmt(meta)}*")
     linhas.append("─" * 32)
 
     # ── Membros sem nenhuma doação ────────────────────────────────────────
     if zerados:
-        linhas.append(f"\n❌ *SEM DOAÇÕES ({len(zerados)} membros):*")
+        if tipo_relatorio == "fechamento":
+            linhas.append(f"\n❌ *NÃO DOARAM NO CICLO ({len(zerados)} membros):*")
+        else:
+            linhas.append(f"\n❌ *SEM DOAÇÕES ({len(zerados)} membros):*")
         for nome, _ in zerados:
             linhas.append(f"   • {nome} — faltam *{_fmt(meta)}*")
 
     # ── Membros abaixo da meta ────────────────────────────────────────────
     if abaixo:
-        linhas.append(f"\n⚠️ *ABAIXO DA META ({len(abaixo)} membros):*")
+        if tipo_relatorio == "fechamento":
+            linhas.append(f"\n⚠️ *NÃO ATINGIRAM A META ({len(abaixo)} membros):*")
+        else:
+            linhas.append(f"\n⚠️ *ABAIXO DA META ({len(abaixo)} membros):*")
         for nome, dados in abaixo:
             pct = int(dados["total"] / meta * 100)
             linhas.append(
@@ -71,25 +77,27 @@ def build_weekly_message(consolidation_data: dict, meta: int = None) -> str:
     n_total     = len(membros)
 
     linhas.append("\n" + "─" * 32)
-    linhas.append(f"📊 Total doado esta semana: *{_fmt(total_geral)}*")
-    linhas.append(f"🏆 Membros na meta: *{n_ok}/{n_total}*")
+    linhas.append(f"📊 Total arrecadado no ciclo: *{_fmt(total_geral)}*")
+    linhas.append(f"🏅 Aproveitamento da guilda: *{n_ok}/{n_total} membros ({int(n_ok/n_total*100 if n_total else 0)}%)*")
 
-    # Aviso especial se estiver perto do domingo
-    hoje = date.today()
-    dias_restantes = (semana["fim"] - hoje).days
-    if dias_restantes == 0:
-        linhas.append("\n🚨 *Hoje é o último dia para atingir a meta!*")
-    elif dias_restantes == 1:
-        linhas.append("\n⏰ *Atenção: falta 1 dia para encerrar a semana!*")
+    # Alertas de prazo (apenas para dias em andamento)
+    if tipo_relatorio == "em_andamento":
+        hoje = date.today()
+        dias_restantes = (semana["fim"] - hoje).days
+        if dias_restantes == 0:
+            linhas.append("\n🚨 *Hoje é o último dia para atingir a meta!*")
+        elif dias_restantes == 1:
+            linhas.append("\n⏰ *Atenção: falta 1 dia para encerrar a semana!*")
+    else:
+        linhas.append("\n📌 _Ciclo finalizado. Um novo ciclo semanal já está valendo!_")
 
     linhas.append("\n🤖 _Robô Sigma — Guilda Red Moon II_")
 
     return "\n".join(linhas)
 
 
-# ── Teste isolado ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     from consolidator import consolidate_weekly
     dados = consolidate_weekly()
-    msg   = build_weekly_message(dados)
+    msg = build_weekly_message(dados)
     print(msg)

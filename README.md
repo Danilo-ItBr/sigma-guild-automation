@@ -4,6 +4,10 @@ Sistema completo e autônomo de **RPA (Robotic Process Automation)** e **Analyti
 
 O robô automatiza o monitoramento diário da guilda: conecta-se ao navegador via **Chrome DevTools Protocol (CDP)**, extrai membros e registros contábeis do tesouro, sincroniza em tempo real com o **Google Sheets**, calcula a consolidação semanal por regras de negócio e despacha relatórios estruturados no **WhatsApp Web** sem custos de API.
 
+<p align="center">
+  <img src="docs/whatsapp_report_preview.png" alt="Relatório Automatizado no WhatsApp" width="340">
+</p>
+
 ---
 
 ## 🎯 Destaques de Engenharia e Tecnologias

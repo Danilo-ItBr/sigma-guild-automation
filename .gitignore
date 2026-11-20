@@ -23,6 +23,7 @@ scraper.log
 whatsapp_debug.png
 debug_*.png
 *.png
+!docs/*.png
 
 # Arquivos de Sistema e IDE
 .idea/

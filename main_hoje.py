@@ -6,7 +6,15 @@ além de D-1 (se ainda não coletado), consolidar a semana e enviar o relatório
 """
 
 import asyncio
+import io
+import sys
 from datetime import datetime, timedelta
+
+# Garante que emojis e caracteres especiais sejam gravados sem erro no log do Windows (cmd/batch)
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 import gspread
 from playwright.async_api import async_playwright
 

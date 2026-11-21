@@ -151,16 +151,24 @@ async def main():
     _banner(f"Robô Sigma Guilda (EXTRAÇÃO EM TEMPO REAL) — {agora.strftime('%d/%m/%Y %H:%M:%S')}")
     print(f"Datas alvos da extração: Ontem ({ontem_full}) e HOJE ({hoje_full}) até o momento")
 
-    # ── Passo 1: Conecta ao Chrome via CDP ───────────────────────────────────
+    # ── Passo 1: Conecta ao Chrome via CDP (com retentativas) ─────────────────
     _banner("Passo 1/7 — Conectando ao Chrome")
     async with async_playwright() as p:
-        try:
-            browser = await p.chromium.connect_over_cdp(config.CDP_URL)
-            print(f"✅ Conectado ao Chrome em {config.CDP_URL}")
-        except Exception as e:
-            print(f"❌ Falha ao conectar ao Chrome: {e}")
-            print("   Certifique-se de que o jogo está aberto com o Abrir_Sigma_Robo.bat.")
-            return
+        browser = None
+        for tentativa in range(1, 4):
+            try:
+                browser = await p.chromium.connect_over_cdp(config.CDP_URL)
+                print(f"✅ Conectado ao Chrome em {config.CDP_URL}")
+                break
+            except Exception as e:
+                print(f"⚠️ Tentativa {tentativa}/3 falhou ao conectar ao Chrome: {e}")
+                if tentativa < 3:
+                    print("   Aguardando 10 segundos antes de tentar novamente...")
+                    await asyncio.sleep(10)
+                else:
+                    print("❌ Não foi possível conectar ao Chrome após 3 tentativas.")
+                    print("   Certifique-se de que o jogo está aberto com o Abrir_Sigma_Robo.bat.")
+                    return
 
         page = await find_player_page(browser)
         if not page:

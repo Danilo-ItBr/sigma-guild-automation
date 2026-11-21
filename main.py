@@ -104,10 +104,10 @@ async def wake_up_game_from_sleep(page):
 
 async def dismiss_initial_popups(page):
     """
-    Fecha modais, avisos de novidades e propagandas que aparecem ao iniciar o jogo do zero.
+    Fecha modais, avisos de novidades, ofertas e propagandas que aparecem no jogo.
     Pressiona Escape repetidamente e tenta clicar em botões de fechar.
     """
-    print("🧹 [Passo 5] Verificando e fechando propagandas/pop-ups iniciais...")
+    print("🧹 Verificando e fechando propagandas/pop-ups...")
     await page.wait_for_timeout(3000)
 
     # 1. Pressiona Escape para fechar pop-ups nativos do jogo
@@ -275,11 +275,13 @@ async def main():
             return
         print(f"✅ Janela do jogo identificada: '{await page.title()}'")
 
-        # Se o jogo já estava aberto: acorda o jogo e remove modo descanso de tela
+        # Garante tela 100% pronta e limpa nos dois cenários:
         if not game_was_closed:
+            # Cenário 1 (Já aberto): Acorda da hibernação e limpa propagandas/pop-ups
             await wake_up_game_from_sleep(page)
+            await dismiss_initial_popups(page)
         else:
-            # Se o jogo foi aberto agora do zero: fecha as propagandas iniciais
+            # Cenário 2 (Estava fechado): Limpa propagandas e anúncios de inicialização
             await dismiss_initial_popups(page)
 
         try:

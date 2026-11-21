@@ -4,20 +4,19 @@ main.py — Orquestrador Principal do Robô Sigma Guilda
 Executado diariamente às 09:00 pelo Windows Task Scheduler via run.bat
 (ou manualmente via Executar_Robo_Manual.bat a qualquer hora).
 
-Fluxo Inteligente com Auto-Start:
-  1. Tenta conectar ao Chrome já aberto (porta 9222).
-  2. SE o jogo estiver fechado:
-     - Inicia automaticamente o Abrir_Sigma_Robo.bat.
-     - Aguarda carregar a janela do jogo.
-     - Fecha propagandas/anúncios/avisos iniciais (Esc / botões de fechar).
-  3. Scrapa MEMBROS atuais -> salva/atualiza na aba 'g_membros'.
-  4. Scrapa REGISTRO -> tesouro para Ontem (D-1) e HOJE (tempo real).
-  5. Atualiza a aba 'g_doacoes' no Google Sheets com zero duplicidade.
-  6. Fecha o painel da guilda (Escape).
-  7. Consolida as doações (com fechamento inteligente na segunda-feira).
-  8. Monta o relatório com destaques e alertas.
-  9. Envia a mensagem formatada para o grupo do WhatsApp (Check-In G2 📆).
-  10. Mantém o jogo aberto normalmente.
+Fluxo Inteligente com Wake-up & Auto-Start:
+  *** SE O JOGO ESTIVER ABERTO:
+      1. Traz o jogo para primeiro plano e remove o modo descanso/hibernação de tela.
+      2. Executa o scraping de Membros e Doações (Ontem + Hoje em tempo real).
+      3. Publica o relatório formatado no WhatsApp.
+      4. Mantém o jogo aberto normalmente.
+
+  *** SE O JOGO ESTIVER FECHADO:
+      5. Dispara automaticamente o comando para abrir o jogo (Abrir_Sigma_Robo.bat).
+      6. Fecha propagandas e anúncios iniciais (Esc / botões de fechar).
+      7. Executa o scraping de Membros e Doações (Ontem + Hoje em tempo real).
+      8. Publica o relatório formatado no WhatsApp.
+      9. Não fecha o jogo, mantém ele aberto na tela.
 """
 
 import asyncio
@@ -75,20 +74,48 @@ def launch_game_if_closed():
         return False
 
 
+async def wake_up_game_from_sleep(page):
+    """
+    Acorda o jogo caso ele esteja no modo descanso de tela / hibernação / ocioso.
+    Traz a aba para o foco, simula movimento do mouse, clique suave e tecla de despertar.
+    """
+    print("⚡ [Passo 1] Acordando o jogo e removendo modo descanso de tela...")
+    try:
+        await page.bring_to_front()
+        # Move o mouse pelo canvas do jogo para disparar listeners de atividade
+        await page.mouse.move(200, 200)
+        await page.wait_for_timeout(300)
+        await page.mouse.move(400, 400)
+        await page.wait_for_timeout(300)
+        # Dispara eventos de atividade do usuário via JavaScript no DOM
+        await page.evaluate('''() => {
+            window.dispatchEvent(new Event('mousemove'));
+            window.dispatchEvent(new Event('keydown'));
+            window.dispatchEvent(new Event('focus'));
+            document.body.dispatchEvent(new Event('click'));
+        }''')
+        # Pressiona Escape para fechar qualquer protetor/overlay de descanso
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(1000)
+        print("✅ Jogo acordado e tela ativa.")
+    except Exception as e:
+        print(f"⚠️ Aviso ao acordar jogo: {e}")
+
+
 async def dismiss_initial_popups(page):
     """
-    Fecha modais, avisos de novidades e propagandas que aparecem ao iniciar o jogo.
-    Pressiona Escape repetidamente e tenta clicar em botões comuns de fechar.
+    Fecha modais, avisos de novidades e propagandas que aparecem ao iniciar o jogo do zero.
+    Pressiona Escape repetidamente e tenta clicar em botões de fechar.
     """
-    print("🧹 Verificando e fechando propagandas/pop-ups iniciais...")
+    print("🧹 [Passo 5] Verificando e fechando propagandas/pop-ups iniciais...")
     await page.wait_for_timeout(3000)
 
-    # 1. Pressiona Escape para fechar a maioria dos pop-ups nativos do jogo
+    # 1. Pressiona Escape para fechar pop-ups nativos do jogo
     for _ in range(3):
         await page.keyboard.press("Escape")
         await page.wait_for_timeout(600)
 
-    # 2. Varredura via JavaScript por botões típicos de fechar/entendi/x
+    # 2. Varredura por botões típicos de fechar/entendi/x
     await page.evaluate('''() => {
         const closeSelectors = [
             'button[class*="fechar"]',
@@ -105,7 +132,7 @@ async def dismiss_initial_popups(page):
             try {
                 const elements = document.querySelectorAll(sel);
                 for (const el of elements) {
-                    if (el.offsetParent !== null) { // se estiver visível
+                    if (el.offsetParent !== null) {
                         el.click();
                     }
                 }
@@ -113,8 +140,6 @@ async def dismiss_initial_popups(page):
         }
     }''')
     await page.wait_for_timeout(1000)
-
-    # Pressiona Escape mais uma vez para garantir tela limpa
     await page.keyboard.press("Escape")
     print("✅ Tela do jogo limpa e pronta para o robô.")
 
@@ -214,7 +239,7 @@ async def main():
     _banner(f"Robô Sigma Guilda — {agora.strftime('%d/%m/%Y %H:%M:%S')}")
     print(f"Datas alvos da extração: Ontem ({ontem_full}) e HOJE ({hoje_full}) até o momento")
 
-    # ── Passo 1: Conecta ao Chrome via CDP (com Auto-Start se fechado) ────────
+    # ── Passo 1: Conecta ao Chrome via CDP (com Wake-up & Auto-Start) ────────
     _banner("Passo 1/7 — Conectando ao Chrome do Jogo")
     async with async_playwright() as p:
         browser = None
@@ -223,36 +248,38 @@ async def main():
         # Primeira tentativa de conexão rápida
         try:
             browser = await p.chromium.connect_over_cdp(config.CDP_URL, timeout=4000)
-            print(f"✅ Conectado ao jogo já aberto em {config.CDP_URL}")
+            print(f"✅ Jogo já estava aberto em {config.CDP_URL}")
         except Exception:
-            print("⚠️ Jogo não está aberto ou não respondeu na porta 9222.")
+            print("⚠️ Jogo estava fechado. Disparando auto-start...")
             game_was_closed = True
             launch_game_if_closed()
             print("⏳ Aguardando 15 segundos para o jogo carregar completamente...")
             await asyncio.sleep(15)
 
-            # Tenta conectar novamente após abrir
             for tentativa in range(1, 5):
                 try:
                     browser = await p.chromium.connect_over_cdp(config.CDP_URL, timeout=5000)
                     print(f"✅ Conectado ao jogo com sucesso na tentativa {tentativa}/4!")
                     break
-                except Exception as e:
+                except Exception:
                     print(f"   Aguardando porta 9222... (tentativa {tentativa}/4)")
                     await asyncio.sleep(5)
 
         if not browser:
-            print("❌ Falha crítica: Não foi possível conectar ao jogo mesmo após iniciar.")
+            print("❌ Falha crítica: Não foi possível conectar ao jogo.")
             return
 
         page = await find_player_page(browser)
         if not page:
             print("❌ Janela do Sigma Project não encontrada dentro do Chrome.")
             return
-        print(f"✅ Página do jogo confirmada: '{await page.title()}'")
+        print(f"✅ Janela do jogo identificada: '{await page.title()}'")
 
-        # Se o jogo precisou ser aberto agora, limpa as propagandas iniciais
-        if game_was_closed:
+        # Se o jogo já estava aberto: acorda o jogo e remove modo descanso de tela
+        if not game_was_closed:
+            await wake_up_game_from_sleep(page)
+        else:
+            # Se o jogo foi aberto agora do zero: fecha as propagandas iniciais
             await dismiss_initial_popups(page)
 
         try:
@@ -275,7 +302,7 @@ async def main():
             # ── Passo 4: fecha painel da guilda (jogo permanece aberto!) ─────
             _banner("Passo 4/7 — Fechando painel da Guilda")
             await close_guild_modal(page)
-            print("✅ Painel da guilda fechado (o jogo continua aberto na tela).")
+            print("✅ Painel da guilda fechado (o jogo permanece aberto na tela).")
 
         except Exception as e:
             print(f"❌ Erro durante coleta dos dados: {e}")
@@ -325,7 +352,7 @@ async def main():
         import traceback
         traceback.print_exc()
 
-    _banner(f"Robô finalizado — {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    _banner(f"Robô finalizado com sucesso — {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
 
 if __name__ == "__main__":
